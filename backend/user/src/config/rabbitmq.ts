@@ -29,3 +29,4 @@ export const publishToQueue = async (queueName: string, message: any) => {
     persistent: true,
   });
 };
+

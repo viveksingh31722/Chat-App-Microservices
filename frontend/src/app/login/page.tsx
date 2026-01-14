@@ -1,14 +1,19 @@
 "use client";
 
+import Loading from "@/src/components/Loading";
+import { useAppData } from "@/src/context/AppContext";
 import axios from "axios";
 import { ArrowRight, Loader2, Mail } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { redirect, useRouter } from "next/navigation";
 import React, { useState } from "react";
+import toast from "react-hot-toast";
 
 const LoginPage = () => {
   const [email, setEmail] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const router = useRouter();
+
+  const {isAuth, loading:userLoading} = useAppData();
 
   const handleSubmit = async (
     e: React.FormEvent<HTMLElement>
@@ -19,18 +24,23 @@ const LoginPage = () => {
       const { data } = await axios.post(`http://localhost:5000/api/v1/login`, {
         email,
       });
-      alert(data.message);
+      toast.success(data.message);
       router.push(`/verify?email=${email}`);
     } catch (error: unknown) {
       if (axios.isAxiosError(error)) {
-        alert(error.response?.data?.message || "Something went wrong");
+        toast.error(error.response?.data?.message || "Something went wrong");
       } else {
-        alert("Unexpected error occurred");
+        toast.error("Unexpected error occurred");
       }
     } finally {
       setIsLoading(false);
     }
   };
+
+  if(userLoading) return <Loading/>
+  if(isAuth){
+    return redirect('/chat');
+  }
 
   return (
     <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4 text-white">
