@@ -3,36 +3,41 @@ import TryCatch from "../config/tryCatch.js";
 import type { AuthenticatedRequest } from "../middleware/isAuth.js";
 import { Chat } from "../models/chat.js";
 import { Message } from "../models/messages.js";
+import { getRecieverSocketId, io } from "../config/socket.js";
 
+/* ================= CREATE NEW CHAT ================= */
 export const createNewChat = TryCatch(
   async (req: AuthenticatedRequest, res) => {
     const userId = req.user?._id;
     const { otherUserId } = req.body;
 
     if (!otherUserId) {
-      res.status(400).json({ message: "otherUserId is required" });
-      return;
+      return res.status(400).json({ message: "otherUserId is required" });
     }
 
-    // Logic to create a new chat between userId and otherUserId
     const existingChat = await Chat.findOne({
       users: { $all: [userId, otherUserId], $size: 2 },
     });
 
     if (existingChat) {
-      return res
-        .status(200)
-        .json({ message: "Chat already exists", chatId: existingChat._id });
+      return res.status(200).json({
+        message: "Chat already exists",
+        chatId: existingChat._id,
+      });
     }
 
     const newChat = await Chat.create({
       users: [userId, otherUserId],
     });
 
-    res.status(201).json({ message: "New chat created", chatId: newChat._id });
+    res.status(201).json({
+      message: "New chat created",
+      chatId: newChat._id,
+    });
   }
 );
 
+/* ================= GET ALL CHATS ================= */
 export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
   const userId = req.user?._id;
 
@@ -44,7 +49,9 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
 
   const chatWithUserData = await Promise.all(
     chats.map(async (chat) => {
-      const otherUserId = chat.users.find((id) => id !== userId);
+      const otherUserId = chat.users.find(
+        (id) => id.toString() !== userId.toString()
+      );
 
       const unseenCount = await Message.countDocuments({
         chatId: chat._id,
@@ -54,12 +61,11 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
 
       try {
         const authHeader = req.headers.authorization as string;
+
         const { data } = await axios.get(
           `${process.env.USER_SERVICE}/api/v1/user/${otherUserId}`,
           {
-            headers: {
-              Authorization: authHeader,
-            },
+            headers: { Authorization: authHeader },
           }
         );
 
@@ -72,7 +78,7 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
           },
         };
       } catch (error) {
-        console.log(error);
+        console.error(error);
         return {
           user: { _id: otherUserId, name: "Unknown User" },
           chat: {
@@ -88,56 +94,66 @@ export const getAllChats = TryCatch(async (req: AuthenticatedRequest, res) => {
   res.status(200).json({ chats: chatWithUserData });
 });
 
+/* ================= SEND MESSAGE ================= */
 export const sendMessage = TryCatch(async (req: AuthenticatedRequest, res) => {
-  // implementation for sending a message
   const senderId = req.user?._id;
   const { chatId, text } = req.body;
   const imageFile = req.file;
 
   if (!senderId) {
-    return res.status(401).json({ Message: "Unauthorized" });
+    return res.status(401).json({ message: "Unauthorized" });
   }
 
   if (!chatId) {
-    return res.status(400).json({ Message: "chatId is required" });
+    return res.status(400).json({ message: "chatId is required" });
   }
 
   if (!text && !imageFile) {
     return res
       .status(400)
-      .json({ Message: "Either text or image is required" });
+      .json({ message: "Either text or image is required" });
   }
 
   const chat = await Chat.findById(chatId);
   if (!chat) {
-    return res.status(404).json({ Message: "Chat not found" });
+    return res.status(404).json({ message: "Chat not found" });
   }
 
   const isUserInChat = chat.users.some(
-    (userId) => userId.toString() === senderId.toString()
+    (id) => id.toString() === senderId.toString()
   );
 
   if (!isUserInChat) {
     return res
       .status(403)
-      .json({ Message: "You are not a participant of this chat" });
+      .json({ message: "You are not a participant of this chat" });
   }
 
   const otherUserId = chat.users.find(
-    (userId) => userId.toString() !== senderId.toString()
+    (id) => id.toString() !== senderId.toString()
   );
 
   if (!otherUserId) {
-    return res.status(401).json({ Message: "No other user" });
+    return res.status(401).json({ message: "No other user" });
   }
 
-  //Socket.io event emission logic can be added here
+  /* ---------- SOCKET PRESENCE CHECK ---------- */
+  const receiverSocketId = getRecieverSocketId(otherUserId.toString());
+  let isReceiverInChatRoom = false;
 
-  let messageData: any = {
-    chatId: chatId,
+  if (receiverSocketId) {
+    const receiverSocket = io.sockets.sockets.get(receiverSocketId);
+    if (receiverSocket && receiverSocket.rooms.has(chatId)) {
+      isReceiverInChatRoom = true;
+    }
+  }
+
+  /* ---------- MESSAGE DATA ---------- */
+  const messageData: any = {
+    chatId,
     sender: senderId,
-    seen: false,
-    seenAt: undefined,
+    seen: isReceiverInChatRoom,
+    seenAt: isReceiverInChatRoom ? new Date() : undefined,
   };
 
   if (imageFile) {
@@ -152,101 +168,117 @@ export const sendMessage = TryCatch(async (req: AuthenticatedRequest, res) => {
     messageData.messageType = "text";
   }
 
-  const newMessage = new Message(messageData);
-
-  const savedMessage = await newMessage.save();
+  const savedMessage = await new Message(messageData).save();
 
   const latestMessageText = imageFile ? "📷 Image" : text;
 
-  await Chat.findByIdAndUpdate(
-    chatId,
-    {
-      latestMessage: {
-        text: latestMessageText,
-        sender: senderId,
-      },
-      updatedAt: new Date(),
+  await Chat.findByIdAndUpdate(chatId, {
+    latestMessage: {
+      text: latestMessageText,
+      sender: senderId,
     },
-    { new: true }
-  );
+    updatedAt: new Date(),
+  });
 
-  // emit to socket.io here
+  /* ---------- SOCKET EMITS ---------- */
+  io.to(chatId).emit("newMessage", savedMessage);
+
+  if (receiverSocketId) {
+    io.to(receiverSocketId).emit("newMessage", savedMessage);
+  }
+
+  const senderSocketId = getRecieverSocketId(senderId.toString());
+  if (senderSocketId) {
+    io.to(senderSocketId).emit("newMessage", savedMessage);
+  }
+
+  if (isReceiverInChatRoom && senderSocketId) {
+    io.to(senderSocketId).emit("messagesSeen", {
+      chatId,
+      seenBy: otherUserId,
+      messageIds: [savedMessage._id],
+    });
+  }
 
   res.status(201).json({ message: savedMessage, sender: senderId });
 });
 
-export const getMessagesByChat = TryCatch( // Its for open chat screen.
+/* ================= GET MESSAGES BY CHAT ================= */
+export const getMessagesByChat = TryCatch(
   async (req: AuthenticatedRequest, res) => {
     const userId = req.user?._id;
     const { chatId } = req.params;
 
     if (!userId) {
-      return res.status(401).json({ Message: "Unauthorized" });
+      return res.status(401).json({ message: "Unauthorized" });
     }
 
     if (!chatId) {
-      return res.status(400).json({ Message: "chatId is required" });
+      return res.status(400).json({ message: "chatId is required" });
     }
 
     const chat = await Chat.findById(chatId);
     if (!chat) {
-      return res.status(404).json({ Message: "Chat not found" });
+      return res.status(404).json({ message: "Chat not found" });
     }
 
     const isUserInChat = chat.users.some(
-      (userId) => userId.toString() === userId.toString()
+      (id) => id.toString() === userId.toString()
     );
 
     if (!isUserInChat) {
       return res
         .status(403)
-        .json({ Message: "You are not a participant of this chat" });
+        .json({ message: "You are not a participant of this chat" });
     }
 
     const messagesToMarkSeen = await Message.find({
-      chatId: chatId,
+      chatId,
       sender: { $ne: userId },
       seen: false,
     });
 
     await Message.updateMany(
       {
-        chatId: chatId,
+        chatId,
         sender: { $ne: userId },
         seen: false,
       },
-      {
-        seen: true,
-        seenAt: new Date(),
-      }
+      { seen: true, seenAt: new Date() }
     );
 
-    const messages = await Message.find({ chatId: chatId }).sort({
-      createdAt: 1,
-    });
+    const messages = await Message.find({ chatId }).sort({ createdAt: 1 });
 
-    const otherUserId = chat.users.find((id) => id !== userId);
+    const otherUserId = chat.users.find(
+      (id) => id.toString() !== userId.toString()
+    );
 
     try {
       const authHeader = req.headers.authorization as string;
+
       const { data } = await axios.get(
         `${process.env.USER_SERVICE}/api/v1/user/${otherUserId}`,
-        {
-          headers: {
-            Authorization: authHeader,
-          },
-        }
+        { headers: { Authorization: authHeader } }
       );
-      if (!otherUserId) {
-        return res.status(400).json({ message: "Other user not found" });
-      }
 
-      // Socket work
+      if (messagesToMarkSeen.length > 0) {
+        const otherUserSocketId = getRecieverSocketId(otherUserId.toString());
+        if (otherUserSocketId) {
+          io.to(otherUserSocketId).emit("messagesSeen", {
+            chatId,
+            seenBy: userId,
+            messageIds: messagesToMarkSeen.map((m) => m._id),
+          });
+        }
+      }
 
       res.status(200).json({ messages, user: data });
     } catch (error) {
-      console.log(error);
-      res.json({ messages, user: { _id: otherUserId, name: "Unknown User" } });
+      console.error(error);
+      res.json({
+        messages,
+        user: { _id: otherUserId, name: "Unknown User" },
+      });
     }
   }
 );
